@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: scrideo
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: HOST
+        value: 0.0.0.0
+      - key: PRODUCTION
+        value: true
