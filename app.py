@@ -48,6 +48,19 @@ FONT_MAP = {
     'palatino': 'Palatino Linotype'
 }
 
+def check_ffmpeg():
+    try:
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+        if result.returncode == 0:
+            logging.info(f"FFmpeg found: {result.stdout.splitlines()[0]}")
+            return True
+        else:
+            logging.warning("FFmpeg not found - video processing may fail")
+            return False
+    except Exception as e:
+        logging.warning(f"FFmpeg check failed: {e}")
+        return False
+
 # -------------------------- SRT to ASS Conversion --------------------------
 
 def get_ass_alignment(position, text_alignment):
@@ -363,3 +376,4 @@ def check_ffmpeg_installation():
     except Exception:
         logger.error("FFmpeg not found")
         return False
+
