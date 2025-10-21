@@ -473,7 +473,7 @@ def download_youtube_video(youtube_url, job_id):
     try:
         temp_video = os.path.join(UPLOAD_FOLDER, f"{job_id}_youtube_video.mp4")
         
-        # Lower quality for free tier
+        # Updated yt-dlp options with better error handling
         ydl_opts = {
             'format': 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[ext=mp4]/best',
             'outtmpl': temp_video,
@@ -483,6 +483,18 @@ def download_youtube_video(youtube_url, job_id):
             'http_chunk_size': 10485760,
             'extractaudio': False,
             'noplaylist': True,
+            # Add these to handle bot detection
+            'extract_flat': False,
+            'ignoreerrors': True,
+            'retries': 3,
+            'fragment_retries': 3,
+            'skip_unavailable_fragments': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'player_skip': ['configs', 'webpage']
+                }
+            }
         }
         
         logger.info(f"Downloading YouTube video (480p max for free tier): {youtube_url}")
@@ -498,7 +510,15 @@ def download_youtube_video(youtube_url, job_id):
         
     except Exception as e:
         logger.error(f"YouTube download failed: {e}")
-        raise Exception(f"Failed to download YouTube video: {str(e)}")
+        # More specific error handling
+        if "Sign in to confirm" in str(e):
+            raise Exception("YouTube is temporarily blocking downloads. Please try again later or use a different video.")
+        elif "Private video" in str(e):
+            raise Exception("This YouTube video is private and cannot be downloaded.")
+        elif "Video unavailable" in str(e):
+            raise Exception("This YouTube video is unavailable.")
+        else:
+            raise Exception(f"Failed to download YouTube video: {str(e)}")
         
 @app.route('/transcribe', methods=['POST'])
 def transcribe_video_url():
@@ -614,3 +634,4 @@ if __name__ == '__main__':
     host = '0.0.0.0'
     
     app.run(host=host, port=port, debug=False)
+
