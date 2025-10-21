@@ -1,13 +1,23 @@
 services:
   - type: web
     name: scrideo
-    env: docker
-    dockerfilePath: ./Dockerfile
+    env: python
+    region: oregon
     plan: free
+    buildCommand: |
+      apt-get update
+      apt-get install -y ffmpeg
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 300 --workers 1
     envVars:
+      - key: FLASK_DEBUG
+        value: false
+      - key: SECRET_KEY
+        generateValue: true
       - key: PORT
         value: 10000
-      - key: HOST
-        value: 0.0.0.0
-      - key: PRODUCTION
-        value: true
+    disk:
+      name: scrideo-storage
+      mountPath: /tmp
+      sizeGB: 1
