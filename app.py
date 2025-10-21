@@ -1,7 +1,6 @@
 import os
 import subprocess
 import logging
-import shlex
 import uuid
 import threading
 import tempfile
@@ -25,17 +24,22 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# CORS
-CORS(app, origins=["http://localhost:5000", "https://scrideo.app"])
+# CORS - Add your Render URL here after deployment
+CORS(app, origins=[
+    "http://localhost:5000",
+    "https://scrideo.app",
+    "*"  # Remove this in production and add your Render URL
+])
 
-# Storage
-TEMP_STORAGE_LIMIT = 200 * 1024 * 1024  # 200MB
+# Storage - Reduced for free tier
+TEMP_STORAGE_LIMIT = 100 * 1024 * 1024  # 100MB (reduced from 200MB)
 TEMP_BASE_DIR = tempfile.mkdtemp(prefix='scrideo_')
 UPLOAD_FOLDER = os.path.join(TEMP_BASE_DIR, 'Uploads')
 PROCESSED_FOLDER = os.path.join(TEMP_BASE_DIR, 'processed')
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['PROCESSED_FOLDER'] = PROCESSED_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(PROCESSED_FOLDER, exist_ok=True)
@@ -45,15 +49,15 @@ job_status = {}
 file_timestamps = {}
 download_timestamps = {}
 processing_lock = threading.Lock()
-users = {}  # In-memory user storage {username: {password_hash, history: [job_ids], favorites: set([job_ids])}}
-user_jobs = {}  # In-memory job storage per user {job_id: {status, filename, download_url, transcription, date, time, duration}}
+users = {}
+user_jobs = {}
 
-# Whisper model
+# Whisper model - Will use tiny model only for free tier
 whisper_model = None
 model_load_lock = threading.Lock()
 
 # JWT Secret
-SECRET_KEY = os.environ.get('SECRET_KEY', 'your-secret-key')  # Use environment variable in production
+SECRET_KEY = os.environ.get('SECRET_KEY', 'change-this-in-production-' + str(uuid.uuid4()))
 
 @app.route("/")
 def serve_index():
@@ -62,9 +66,13 @@ def serve_index():
 @app.route('/health')
 def health():
     """Health check"""
-    if check_ffmpeg_installation():
-        return jsonify({"status": "ok", "ffmpeg": "available"})
-    return jsonify({"status": "error", "error": "FFmpeg not found"}), 500
+    memory = psutil.virtual_memory()
+    return jsonify({
+        "status": "ok",
+        "ffmpeg": "available" if check_ffmpeg_installation() else "missing",
+        "memory_available_mb": round(memory.available / (1024**2), 2),
+        "storage_used_mb": round(get_directory_size(TEMP_BASE_DIR) / (1024**2), 2)
+    })
 
 def get_directory_size(directory):
     total_size = 0
@@ -79,8 +87,9 @@ def get_directory_size(directory):
     return total_size
 
 def cleanup_old_files():
+    """Aggressive cleanup for free tier"""
     current_time = datetime.now()
-    cutoff_time = current_time - timedelta(hours=6)
+    cutoff_time = current_time - timedelta(hours=2)  # Reduced from 6 hours
     files_to_remove = []
     
     with processing_lock:
@@ -113,37 +122,30 @@ def cleanup_job_files(job_id):
                         logger.error(f"Failed to remove {filepath}: {e}")
 
 def periodic_cleanup():
+    """More frequent cleanup for free tier"""
     while True:
-        time.sleep(7200)  # 2 hours
+        time.sleep(1800)  # 30 minutes (reduced from 2 hours)
         current_usage = get_directory_size(TEMP_BASE_DIR)
-        if current_usage / TEMP_STORAGE_LIMIT > 0.8:
+        if current_usage / TEMP_STORAGE_LIMIT > 0.7:  # Cleanup at 70% (reduced from 80%)
             cleanup_old_files()
 
 cleanup_thread = threading.Thread(target=periodic_cleanup, daemon=True)
 cleanup_thread.start()
 
 def load_whisper_model():
+    """Always use tiny model on free tier"""
     global whisper_model
     with model_load_lock:
         if whisper_model is not None:
             return whisper_model
         try:
-            memory = psutil.virtual_memory()
-            available_gb = memory.available / (1024**3)
-            model_name = "tiny" if available_gb < 1.0 else "base"
-            logger.info(f"Loading Whisper model: {model_name}")
-            whisper_model = whisper.load_model(model_name)
-            logger.info(f"Successfully loaded Whisper model: {model_name}")
+            logger.info("Loading Whisper tiny model (optimized for free tier)")
+            whisper_model = whisper.load_model("tiny")
+            logger.info("Successfully loaded Whisper tiny model")
             return whisper_model
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
-            try:
-                logger.info("Falling back to tiny model")
-                whisper_model = whisper.load_model("tiny")
-                return whisper_model
-            except Exception as fallback_error:
-                logger.error(f"Failed to load fallback model: {fallback_error}")
-                raise
+            raise
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
@@ -215,12 +217,11 @@ def get_profile():
         
         for job_id in job_ids:
             job_info = user_jobs.get(job_id, {}).copy()
-            if job_info:  # Only include jobs that exist in user_jobs
+            if job_info:
                 job_info['job_id'] = job_id
                 job_info['favorited'] = job_id in favorites
                 history.append(job_info)
         
-        # Sort history by date and time (newest first)
         history.sort(key=lambda x: (x.get('date', ''), x.get('time', '')), reverse=True)
         
         return jsonify({
@@ -242,76 +243,27 @@ def delete_history_item(job_id):
         if not user:
             return jsonify({'error': 'User not found'}), 404
         
-        # Remove from user's history
         if job_id in user['history']:
             user['history'].remove(job_id)
         
-        # Remove from favorites if present
         if 'favorites' in user and job_id in user['favorites']:
             user['favorites'].discard(job_id)
         
-        # Remove from job_status and user_jobs
         if job_id in job_status:
             del job_status[job_id]
         if job_id in user_jobs:
             del user_jobs[job_id]
         
-        # Clean up timestamps
         if job_id in file_timestamps:
             del file_timestamps[job_id]
         if job_id in download_timestamps:
             del download_timestamps[job_id]
     
-    # Clean up files (outside the lock to avoid blocking)
     cleanup_job_files(job_id)
     
     logger.info(f"Deleted history item {job_id} for user {username}")
     return jsonify({'message': 'History item deleted successfully'}), 200
 
-def cleanup_job_files(job_id):
-    """Clean up all files associated with a job"""
-    try:
-        # Clean up uploaded files
-        if os.path.exists(UPLOAD_FOLDER):
-            for filename in os.listdir(UPLOAD_FOLDER):
-                if filename.startswith(job_id):
-                    filepath = os.path.join(UPLOAD_FOLDER, filename)
-                    try:
-                        os.remove(filepath)
-                        logger.info(f"Deleted uploaded file: {filepath}")
-                    except Exception as e:
-                        logger.error(f"Failed to remove uploaded file {filepath}: {e}")
-        
-        # Clean up processed files
-        if os.path.exists(PROCESSED_FOLDER):
-            for filename in os.listdir(PROCESSED_FOLDER):
-                if filename.startswith(job_id):
-                    filepath = os.path.join(PROCESSED_FOLDER, filename)
-                    try:
-                        os.remove(filepath)
-                        logger.info(f"Deleted processed file: {filepath}")
-                    except Exception as e:
-                        logger.error(f"Failed to remove processed file {filepath}: {e}")
-        
-        # Clean up any temporary subtitle files
-        temp_files = [
-            os.path.join(PROCESSED_FOLDER, f"{job_id}_captions.srt"),
-            os.path.join(PROCESSED_FOLDER, f"{job_id}_captions.ass"),
-            os.path.join(UPLOAD_FOLDER, f"{job_id}_youtube_video.mp4"),
-            os.path.join(UPLOAD_FOLDER, f"{job_id}_youtube_fallback.mp4")
-        ]
-        
-        for temp_file in temp_files:
-            if os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                    logger.info(f"Deleted temp file: {temp_file}")
-                except Exception as e:
-                    logger.error(f"Failed to remove temp file {temp_file}: {e}")
-                    
-    except Exception as e:
-        logger.error(f"Error during file cleanup for job {job_id}: {e}")
-        
 @app.route('/history/<job_id>/favorite', methods=['POST'])
 def toggle_favorite(job_id):
     token = request.headers.get('Authorization', '').replace('Bearer ', '')
@@ -324,15 +276,12 @@ def toggle_favorite(job_id):
         if not user:
             return jsonify({'error': 'User not found'}), 404
         
-        # Check if job exists in user's history
         if job_id not in user.get('history', []):
             return jsonify({'error': 'Job not found in user history'}), 404
         
-        # Ensure favorites set exists
         if 'favorites' not in user:
             user['favorites'] = set()
         
-        # Toggle favorite status
         if job_id in user['favorites']:
             user['favorites'].discard(job_id)
             favorited = False
@@ -352,8 +301,9 @@ def process_video_task(job_id, filepath, filename, is_youtube=False, token=None,
             job_status[job_id] = {'status': 'transcribing', 'filename': filename}
 
         model = load_whisper_model()
-        logger.info(f"Starting transcription")
+        logger.info(f"Starting transcription with tiny model")
         result = model.transcribe(filepath, language="en", task="transcribe", verbose=False, word_timestamps=True)
+        
         if not result or 'segments' not in result or not result['segments']:
             raise Exception("No speech detected")
 
@@ -374,13 +324,11 @@ def process_video_task(job_id, filepath, filename, is_youtube=False, token=None,
         
         transcription_text = "\n".join([seg['text'].strip() for seg in result["segments"] if seg['text'].strip()])
         
-        # Calculate video duration
         video_duration = result.get('segments', [])[-1].get('end', 0) if result.get('segments') else 0
         
         with processing_lock:
             job_status[job_id] = {'status': 'embedding_subtitles', 'filename': filename}
         
-        # Pass caption_settings to overlay_subtitles
         overlay_subtitles(filepath, srt_path, output_video_path, caption_settings=caption_settings)
         
         if os.path.exists(output_video_path):
@@ -402,6 +350,8 @@ def process_video_task(job_id, filepath, filename, is_youtube=False, token=None,
                     username = verify_token(token)
                     if username and username in users:
                         users[username]['history'].append(job_id)
+            
+            # Cleanup immediately after processing
             if os.path.exists(filepath):
                 os.remove(filepath)
             if os.path.exists(srt_path):
@@ -439,14 +389,14 @@ def upload_video():
     if video.filename == '':
         return jsonify({'error': 'Empty filename'}), 400
 
-    # Check file extension for video files only
     allowed_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.3gp'}
     file_ext = os.path.splitext(video.filename.lower())[1]
     if file_ext not in allowed_extensions:
         return jsonify({'error': 'Only video files are allowed. Supported formats: MP4, AVI, MOV, MKV, WEBM, FLV, WMV, M4V, 3GP'}), 400
 
-    if request.content_length and request.content_length > 100 * 1024 * 1024:
-        return jsonify({'error': 'File too large (100MB max)'}), 400
+    # Reduced file size limit for free tier
+    if request.content_length and request.content_length > 50 * 1024 * 1024:
+        return jsonify({'error': 'File too large (50MB max on free tier)'}), 400
 
     current_storage = get_directory_size(TEMP_BASE_DIR)
     estimated_size = request.content_length or 0
@@ -467,7 +417,6 @@ def upload_video():
             file_timestamps[job_id] = datetime.now()
             job_status[job_id] = {'status': 'uploaded', 'filename': video.filename}
         
-        # Extract caption settings
         caption_settings = None
         if 'captionSettings' in request.form:
             try:
@@ -524,8 +473,9 @@ def download_youtube_video(youtube_url, job_id):
     try:
         temp_video = os.path.join(UPLOAD_FOLDER, f"{job_id}_youtube_video.mp4")
         
+        # Lower quality for free tier
         ydl_opts = {
-            'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best',
+            'format': 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[ext=mp4]/best',
             'outtmpl': temp_video,
             'merge_output_format': 'mp4',
             'quiet': True,
@@ -535,7 +485,7 @@ def download_youtube_video(youtube_url, job_id):
             'noplaylist': True,
         }
         
-        logger.info(f"Downloading YouTube video: {youtube_url}")
+        logger.info(f"Downloading YouTube video (480p max for free tier): {youtube_url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(youtube_url, download=True)
             title = info.get('title', 'youtube_video')
@@ -548,31 +498,7 @@ def download_youtube_video(youtube_url, job_id):
         
     except Exception as e:
         logger.error(f"YouTube download failed: {e}")
-        
-        try:
-            logger.info("Trying fallback download method...")
-            temp_video_fallback = os.path.join(UPLOAD_FOLDER, f"{job_id}_youtube_fallback.mp4")
-            
-            ydl_opts_fallback = {
-                'format': 'best',
-                'outtmpl': temp_video_fallback,
-                'quiet': True,
-                'no_warnings': True,
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
-                info = ydl.extract_info(youtube_url, download=True)
-                title = info.get('title', 'youtube_video')
-                
-            if os.path.exists(temp_video_fallback):
-                logger.info(f"Fallback download successful: {title}")
-                return temp_video_fallback, f"{title}.mp4"
-            else:
-                raise Exception("Fallback download also failed")
-                
-        except Exception as fallback_error:
-            logger.error(f"Fallback download also failed: {fallback_error}")
-            raise Exception(f"Failed to download YouTube video: {str(e)}")
+        raise Exception(f"Failed to download YouTube video: {str(e)}")
         
 @app.route('/transcribe', methods=['POST'])
 def transcribe_video_url():
@@ -584,9 +510,9 @@ def transcribe_video_url():
         return jsonify({"error": "YouTube URL required"}), 400
     
     current_storage = get_directory_size(TEMP_BASE_DIR)
-    if current_storage > TEMP_STORAGE_LIMIT * 0.9:
+    if current_storage > TEMP_STORAGE_LIMIT * 0.85:
         cleanup_old_files()
-        if get_directory_size(TEMP_BASE_DIR) > TEMP_STORAGE_LIMIT * 0.9:
+        if get_directory_size(TEMP_BASE_DIR) > TEMP_STORAGE_LIMIT * 0.85:
             return jsonify({"error": "Server storage full"}), 507
 
     job_id = str(uuid.uuid4())
@@ -628,7 +554,7 @@ def storage_info():
     
     return jsonify({
         'current_usage_mb': round(current_usage / 1024 / 1024, 2),
-        'limit_mb': 200,
+        'limit_mb': 100,
         'usage_percentage': round((current_usage / TEMP_STORAGE_LIMIT) * 100, 2),
         'active_jobs': active_jobs,
         'downloaded_jobs': downloaded_jobs
@@ -639,29 +565,26 @@ def system_info():
     memory = psutil.virtual_memory()
     
     return jsonify({
-        'whisper_models': ["tiny", "base"],
-        'current_model': 'adaptive (tiny/base based on memory)',
-        'temp_storage_mb': 200,
+        'tier': 'FREE (Render)',
+        'whisper_model': 'tiny (optimized)',
+        'max_file_size_mb': 50,
+        'temp_storage_mb': 100,
         'memory_total_gb': round(memory.total / (1024**3), 1),
         'memory_available_gb': round(memory.available / (1024**3), 1),
-        'memory_used_gb': round(memory.used / (1024**3), 1),
         'features': [
-            'Video file processing only (no audio files)',
-            'YouTube video processing',
+            'Video files up to 50MB',
+            'YouTube videos (480p max)',
             'Forced English subtitles',
-            'Word-level timestamps',
             'Embedded subtitles in video',
-            'Status polling',
-            'Download tracking',
-            'Adaptive model selection',
-            'User authentication with history and profile',
-            'Caption customization (size, color, position, alignment)',
-            'History search functionality',
-            'Date, time, and duration tracking',
-            'Browser notifications for completion',
-            'Favorite videos',
-            'Delete history items',
-            'Advanced filtering and search'
+            'User authentication',
+            'Caption customization',
+            'History & favorites'
+        ],
+        'limitations': [
+            'Service sleeps after 15 min inactivity',
+            '512MB RAM limit',
+            'Processing may be slower',
+            'Files auto-deleted after 2 hours'
         ]
     })
 
@@ -676,19 +599,18 @@ def cleanup_on_exit():
         pass
 
 atexit.register(cleanup_on_exit)
+
 if __name__ == '__main__':
+    logger.info("🚀 Starting Scrideo (FREE TIER OPTIMIZED)")
+    logger.info(f"📁 Temp storage: {TEMP_BASE_DIR}")
+    logger.info(f"💾 Storage limit: 100MB")
+    logger.info(f"📹 Max file size: 50MB")
+    logger.info(f"🧠 Whisper model: tiny")
+    
     if not check_ffmpeg_installation():
-        logger.error("FFmpeg not found. Exiting.")
-        exit(1)
+        logger.warning("⚠️ FFmpeg not detected, but continuing...")
+    
     port = int(os.environ.get('PORT', 5000))
-    host = os.environ.get('HOST', '0.0.0.0')  # KEEP THIS - it's perfect!
-    debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    host = '0.0.0.0'
     
-    logger.info(f"Temporary storage directory: {TEMP_BASE_DIR}")
-    logger.info(f"Storage limit: 200MB")
-    
-    print("🚀 Starting Scrideo Server...")
-    print(f"🌐 Access at: http://{host}:{port}")
-    print("Press Ctrl+C to stop the server")
-    
-    app.run(host=host, port=port, debug=debug) 
+    app.run(host=host, port=port, debug=False)
