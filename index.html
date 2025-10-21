@@ -1362,13 +1362,27 @@
                 showNotification('Video processing started! We\'ll notify you when it\'s ready.', 'info', 3000);
                 pollStatus(data.job_id);
                 
-            } catch (error) {
-                console.error('Processing error:', error);
-                showResult(`Error: ${error.message}`, true);
-                showNotification(`Processing failed: ${error.message}`, 'error');
-                updateButtonState(false);
-                hideStatus();
-            }
+            // In your transcribeForm event listener, add better error handling
+} catch (error) {
+    console.error('Processing error:', error);
+    let userFriendlyError = error.message;
+    
+    // Convert technical errors to user-friendly messages
+    if (error.message.includes('YouTube is temporarily blocking downloads')) {
+        userFriendlyError = "YouTube is temporarily blocking downloads. Please try:\n• A different YouTube video\n• Uploading the video file directly\n• Trying again in a few minutes";
+    } else if (error.message.includes('private') || error.message.includes('unavailable')) {
+        userFriendlyError = "This YouTube video cannot be accessed. It may be private, unavailable, or restricted.";
+    } else if (error.message.includes('File too large')) {
+        userFriendlyError = "File is too large (50MB max on free tier). Please use a smaller video file.";
+    } else if (error.message.includes('Server storage full')) {
+        userFriendlyError = "Server storage is temporarily full. Please try again in a few minutes.";
+    }
+    
+    showResult(`Error: ${userFriendlyError}`, true);
+    showNotification(`Processing failed: ${userFriendlyError}`, 'error');
+    updateButtonState(false);
+    hideStatus();
+}
         });
 
         async function pollStatus(jobId) {
@@ -1650,4 +1664,5 @@
         });
     </script>
 </body>
+
 </html>
