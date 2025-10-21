@@ -580,31 +580,30 @@ def storage_info():
         'downloaded_jobs': downloaded_jobs
     })
 
-@app.route('/system_info', methods=['GET'])
-def system_info():
+@app.route('/system_health', methods=['GET'])
+def system_health():
+    """Enhanced system health check"""
     memory = psutil.virtual_memory()
+    disk = psutil.disk_usage('/tmp')
     
     return jsonify({
-        'tier': 'FREE (Render)',
-        'whisper_model': 'tiny (optimized)',
-        'max_file_size_mb': 50,
-        'temp_storage_mb': 100,
-        'memory_total_gb': round(memory.total / (1024**3), 1),
-        'memory_available_gb': round(memory.available / (1024**3), 1),
-        'features': [
-            'Video files up to 50MB',
-            'YouTube videos (480p max)',
-            'Forced English subtitles',
-            'Embedded subtitles in video',
-            'User authentication',
-            'Caption customization',
-            'History & favorites'
-        ],
-        'limitations': [
-            'Service sleeps after 15 min inactivity',
-            '512MB RAM limit',
-            'Processing may be slower',
-            'Files auto-deleted after 2 hours'
+        'status': 'healthy',
+        'memory': {
+            'total_gb': round(memory.total / (1024**3), 2),
+            'available_gb': round(memory.available / (1024**3), 2),
+            'percent_used': memory.percent
+        },
+        'storage': {
+            'used_mb': round(get_directory_size(TEMP_BASE_DIR) / (1024**2), 2),
+            'total_mb': 100,
+            'system_disk_free_gb': round(disk.free / (1024**3), 2)
+        },
+        'active_jobs': len([j for j in job_status.values() if j.get('status') not in ['completed', 'failed']]),
+        'youtube_status': 'limited',  # Be transparent about YouTube limitations
+        'recommendations': [
+            'Use direct file upload for best reliability',
+            'Keep videos under 10 minutes for faster processing',
+            'YouTube downloads may be temporarily unavailable'
         ]
     })
 
@@ -634,4 +633,5 @@ if __name__ == '__main__':
     host = '0.0.0.0'
     
     app.run(host=host, port=port, debug=False)
+
 
